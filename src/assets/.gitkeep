@@ -1,0 +1,7 @@
+# Assets Folder
+
+Place your TUM logo here:
+- tum_logo.svg (preferred)
+- tum_logo.png (fallback)
+
+The interface will automatically detect and display the logo if present.

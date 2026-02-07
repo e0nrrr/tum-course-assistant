@@ -1,0 +1,34 @@
+/* TUM Course Assistant - Custom Styles */
+/* TUM Corporate Design Colors */
+
+:root {
+    --tum-blue: #0065BD;
+    --tum-dark: #003359;
+    --tum-light: #F8F9FA;
+}
+
+/* Body background */
+body {
+    background-color: #fafafa !important;
+}
+
+/* Primary buttons */
+button[class*="primary"] {
+    background-color: var(--tum-blue) !important;
+}
+
+/* Course card headers */
+h3 {
+    color: var(--tum-blue);
+}
+
+/* Lucide close icon - X and circle */
+.lucide-x {
+    stroke: var(--tum-blue) !important;
+}
+
+/* Target the circle element specifically in lucide-x icon */
+svg.lucide-x circle,
+.lucide.lucide-x circle {
+    stroke: var(--tum-blue) !important;
+}
