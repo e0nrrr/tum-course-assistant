@@ -77,6 +77,10 @@ LLM_MAX_TOKENS_CLASSIFICATION: int = 50     # For intent classification
 RAG_TOP_K_RESULTS: int = int(os.getenv("RAG_TOP_K_RESULTS", "5"))
 RAG_MAX_RECOMMENDATIONS: int = int(os.getenv("RAG_MAX_RECOMMENDATIONS", "5"))
 
+# Query Expansion settings
+QUERY_EXPANSION_ENABLED: bool = True
+QUERY_EXPANSION_MIN_WORDS: int = 5  # Expand queries shorter than this
+
 # Embedding batch size for index building
 EMBEDDING_BATCH_SIZE: int = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 

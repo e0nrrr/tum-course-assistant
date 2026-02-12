@@ -71,6 +71,38 @@ FOLLOWUP_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# Regex patterns for LANGUAGE PREFERENCE queries - these should ALWAYS trigger SEARCH
+# When user mentions a teaching language, they want a NEW filtered search
+# This catches cases like "German courses", "courses in German", "Almanca dersler"
+LANGUAGE_SEARCH_PATTERNS = re.compile(
+    r'(\b(german|deutsch|almanca)\b.*\b(course|courses|class|classes|ders|dersler|kurs|kurslar|lecture|lectures|taught|language|sprache|dil)\b|'
+    r'\b(course|courses|class|classes|ders|dersler|kurs|kurslar|lecture|lectures|taught|language|sprache|dil)\b.*\b(german|deutsch|almanca)\b|'
+    r'\b(english|ingilizce|englisch)\b.*\b(course|courses|class|classes|ders|dersler|kurs|kurslar|lecture|lectures|taught|language|sprache|dil)\b|'
+    r'\b(course|courses|class|classes|ders|dersler|kurs|kurslar|lecture|lectures|taught|language|sprache|dil)\b.*\b(english|ingilizce|englisch)\b|'
+    r'\b(in|on)\s+(german|deutsch|almanca|english|ingilizce|englisch)\b|'
+    r'\balmanca\b|\bingilizce\b)',
+    re.IGNORECASE
+)
+
+# Regex patterns for COURSE SEARCH phrases in ANY language
+# These indicate the user wants a NEW search, not a followup about existing results.
+# Catches: "welche kurse gibt es über X", "X hakkında ders var mı", "show me courses about X", etc.
+COURSE_SEARCH_PHRASES = re.compile(
+    r'('
+    # English search phrases
+    r'\b(show|find|search|look\s*for|recommend|suggest|list|give\s*me|any)\b.*\b(course|courses|class|classes|lecture|lectures|module|modules)\b|'
+    r'\b(course|courses|class|classes|lecture|lectures|module|modules)\b.*\b(about|on|for|related|regarding|in)\b|'
+    r'\b(are\s*there|is\s*there|do\s*you\s*have|can\s*you\s*find)\b.*\b(course|courses|class|classes)\b|'
+    # German search phrases
+    r'\b(welche|zeig|finde|suche|gibt\s*es|haben\s*sie|empfiehl)\b.*\b(kurs|kurse|vorlesung|vorlesungen|fach|fächer|veranstaltung|veranstaltungen|seminar|seminare)\b|'
+    r'\b(kurs|kurse|vorlesung|vorlesungen|fach|fächer|veranstaltung|veranstaltungen|seminar|seminare)\b.*\b(über|zu|zum|zur|für|mit|im\s*bereich)\b|'
+    # Turkish search phrases
+    r'\b(göster|bul|ara|öner|listele|var\s*mı)\b.*\b(ders|dersler|kurs|kurslar)\b|'
+    r'\b(ders|dersler|kurs|kurslar)\b.*\b(hakkında|ile\s*ilgili|için|var\s*mı|arıyorum|istiyorum)\b'
+    r')',
+    re.IGNORECASE
+)
+
 # Regex patterns for NEW course topics - these should trigger SEARCH even with context
 # When user mentions a new academic topic, they want NEW course recommendations
 NEW_TOPIC_PATTERNS = re.compile(
@@ -180,6 +212,17 @@ def classify_intent(
     # Pure help request
     if HELP_PATTERNS.match(msg_clean):
         return "HELP"
+    
+    # LANGUAGE PREFERENCE DETECTION - ALWAYS triggers SEARCH!
+    # If user mentions a teaching language (German, English, Almanca, etc.)
+    # they want a new filtered search, NOT a followup from existing context
+    if LANGUAGE_SEARCH_PATTERNS.search(msg_clean):
+        return "SEARCH"
+    
+    # COURSE SEARCH PHRASE DETECTION - catches multilingual search requests
+    # "welche kurse gibt es über X", "X hakkında ders var mı", "show me courses about X"
+    if COURSE_SEARCH_PHRASES.search(msg_clean):
+        return "SEARCH"
     
     # NEW TOPIC DETECTION - MUST come BEFORE followup check!
     # If user mentions a new academic topic, they want a NEW search

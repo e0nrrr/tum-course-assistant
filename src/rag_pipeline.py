@@ -51,6 +51,7 @@ class CourseResult:
         also_in_electives: Is this course also in elective category?
         content: Course content (from Content section)
         learning_outcomes: Course learning outcomes (from Intended Learning Outcomes section)
+        language: Course language (e.g., "German", "English", "German/English")
     """
 
     course_id: str
@@ -63,6 +64,7 @@ class CourseResult:
     also_in_electives: bool = False
     content: str | None = None
     learning_outcomes: str | None = None
+    language: str = "English"  # Default to English
 
     def __str__(self) -> str:
         """Nicely formatted string representation."""
@@ -163,21 +165,85 @@ def get_chroma_collection() -> chromadb.Collection:
 # =============================================================================
 
 
-def detect_and_translate_query(query: str, client: OpenAI) -> str:
+def _is_likely_english(text: str) -> bool:
     """
-    Detects query language and translates if not English.
+    Quick heuristic to detect if text is likely English.
+    Returns True if text appears to be English, False otherwise.
     
-    Since course descriptions in ChromaDB are in English/German,
-    we translate multilingual queries to English for embedding.
+    Checks:
+    1. Non-ASCII ratio (Turkish/German special chars: ö, ü, ş, ğ, ı, ç, ä, ß)
+    2. Common non-English words
+    """
+    import re
+    
+    text_lower = text.lower()
+    words = set(re.findall(r'\b\w+\b', text_lower))
+    
+    # Turkish-EXCLUSIVE characters (ş, ğ, ı are NOT used in German)
+    turkish_only_chars = set('şğı')
+    turkish_words = {'ders', 'dersler', 'hakkında', 'istiyorum', 'arıyorum', 'bul', 
+                     'göster', 'ilgili', 'için', 've', 'ile', 'nasıl', 'nedir',
+                     'yapay', 'zeka', 'öğrenmek'}
+    
+    # German-specific words (NOT also English)
+    german_words = {'und', 'ich', 'möchte', 'suche', 'kurse', 'kurs', 'über',
+                    'finden', 'zeigen', 'lernen', 'wie', 'können', 'interessiert',
+                    'welche', 'gibt', 'nicht', 'auch', 'oder', 'für', 'mit',
+                    'vorlesung', 'fach', 'seminar', 'bitte', 'danke'}
+    
+    # Check Turkish-exclusive chars
+    if any(c in turkish_only_chars for c in text_lower):
+        return False
+    
+    # Check Turkish words
+    if words & turkish_words:
+        return False
+    
+    # Check German words
+    if words & german_words:
+        return False
+    
+    # Check German-exclusive chars (ä, ß)
+    if any(c in set('äß') for c in text_lower):
+        return False
+    
+    # ü/ö without German words context — could be Turkish
+    if any(c in set('üöç') for c in text_lower):
+        return False
+    
+    # If mostly ASCII and no known foreign words, assume English
+    return True
+
+
+def _expand_query(query: str, client: OpenAI) -> str:
+    """
+    Expands a short/vague query with related academic terms using LLM.
+    
+    For example:
+        "AI courses" -> "artificial intelligence AI machine learning deep learning
+                         neural networks computer vision NLP courses"
+    
+    This dramatically improves embedding similarity for broad topic queries
+    by matching more terms in course descriptions.
     
     Args:
-        query: User query (in any language)
+        query: English query (already translated if needed)
         client: OpenAI client
     
     Returns:
-        English query (returns same if already English)
+        Expanded query string
     """
-    # Quick language detection + translation with GPT-4o-mini
+    import re
+    word_count = len(re.findall(r'\b\w+\b', query))
+    
+    if not config.QUERY_EXPANSION_ENABLED:
+        return query
+    
+    if word_count >= config.QUERY_EXPANSION_MIN_WORDS:
+        print(f"   Query has {word_count} words, skipping expansion")
+        return query
+    
+    print(f"   Short query ({word_count} words), expanding...")
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -185,27 +251,89 @@ def detect_and_translate_query(query: str, client: OpenAI) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "You are a translation assistant. If the user query is in English, return it as-is. "
-                        "If it's in another language (Turkish, German, etc.), translate it to English. "
-                        "Return ONLY the English query text, nothing else."
+                        "You are a university course search assistant. "
+                        "Given a short course search query, expand it with 5-8 closely related "
+                        "academic keywords and synonyms that would appear in university course "
+                        "descriptions. Include both formal academic terms and common alternatives.\n\n"
+                        "Rules:\n"
+                        "- Return ONLY the expanded query as a single line\n"
+                        "- Keep the original words and ADD related terms\n"
+                        "- Focus on terms likely found in course titles and descriptions\n"
+                        "- Do NOT add explanations or formatting\n\n"
+                        "Examples:\n"
+                        "Input: AI courses\n"
+                        "Output: artificial intelligence AI machine learning deep learning neural networks computer vision natural language processing data science courses\n\n"
+                        "Input: entrepreneurship\n"
+                        "Output: entrepreneurship startup business venture creation innovation new business development technology entrepreneurship\n\n"
+                        "Input: software engineering\n"
+                        "Output: software engineering software development programming systems design software architecture agile development code quality testing"
                     )
                 },
                 {"role": "user", "content": query}
             ],
-            temperature=0,
-            max_tokens=200
+            temperature=0.3,
+            max_tokens=100
         )
-        translated = response.choices[0].message.content.strip()
-        
-        # Log translation (can be removed in production)
-        if translated.lower() != query.lower():
-            print(f"   Query translated: '{query}' -> '{translated}'")
-        
-        return translated
+        expanded = response.choices[0].message.content.strip()
+        print(f"   Query expanded: '{query}' -> '{expanded}'")
+        return expanded
     except Exception as e:
-        # Fallback: Use original query if translation fails
-        print(f"   Translation failed, using original query: {e}")
+        print(f"   Query expansion failed, using original: {e}")
         return query
+
+
+def detect_and_translate_query(query: str, client: OpenAI) -> str:
+    """
+    Detects query language, translates if not English, then expands short queries.
+    
+    Pipeline:
+        1. Language detection (heuristic)
+        2. Translation to English (if needed, via LLM)
+        3. Query expansion with related terms (if short query, via LLM)
+    
+    Since course descriptions in ChromaDB are in English/German,
+    we translate multilingual queries to English for embedding,
+    then expand short queries with academic synonyms for better recall.
+    
+    Args:
+        query: User query (in any language)
+        client: OpenAI client
+    
+    Returns:
+        English query, potentially expanded with related terms
+    """
+    # Step 1: Translation (if needed)
+    if _is_likely_english(query):
+        print(f"   Query detected as English, skipping translation")
+        english_query = query
+    else:
+        print(f"   Non-English query detected, translating...")
+        try:
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Translate the following query to English. "
+                            "Return ONLY the English translation, nothing else."
+                        )
+                    },
+                    {"role": "user", "content": query}
+                ],
+                temperature=0,
+                max_tokens=200
+            )
+            english_query = response.choices[0].message.content.strip()
+            print(f"   Query translated: '{query}' -> '{english_query}'")
+        except Exception as e:
+            print(f"   Translation failed, using original query: {e}")
+            english_query = query
+    
+    # Step 2: Query expansion (for short queries)
+    expanded_query = _expand_query(english_query, client)
+    
+    return expanded_query
 
 
 def embed_query(query: str, client: OpenAI) -> list[float]:
@@ -355,17 +483,27 @@ def search_courses(
         >>> # Auto-detect: "German courses" -> filters by language=German
         >>> results = search_courses("German courses about innovation")
     """
+    import time as _time
+    _start_total = _time.time()
+    
     # 1. Get OpenAI client
+    print(f"[DEBUG] RAG search started for: '{query[:50]}...'")
     client = get_openai_client()
 
     # 2. Get Chroma collection
+    _t0 = _time.time()
     collection = get_chroma_collection()
+    print(f"[DEBUG] ChromaDB collection loaded: {_time.time() - _t0:.2f}s")
 
     # 3. Translate query to English (if needed)
+    _t0 = _time.time()
     query_translated = detect_and_translate_query(query, client)
+    print(f"[DEBUG] Query translation: {_time.time() - _t0:.2f}s")
 
     # 4. Calculate query embedding (with translated query)
+    _t0 = _time.time()
     query_embedding = embed_query(query_translated, client)
+    print(f"[DEBUG] Embedding calculation: {_time.time() - _t0:.2f}s")
 
     # 5. Determine metadata filters
     effective_filter = where_filter
@@ -377,6 +515,7 @@ def search_courses(
             print(f"   Auto-detected filter: {detected}")
 
     # 6. Search in ChromaDB
+    _t0 = _time.time()
     query_params = {
         "query_embeddings": [query_embedding],
         "n_results": n_results,
@@ -387,6 +526,7 @@ def search_courses(
         query_params["where"] = effective_filter
     
     results = collection.query(**query_params)
+    print(f"[DEBUG] ChromaDB search ({n_results} results): {_time.time() - _t0:.2f}s")
 
     # 7. Convert results to CourseResult list
     course_results = []
@@ -414,6 +554,7 @@ def search_courses(
         # Get new section fields
         content = metadata.get("content") or None
         learning_outcomes = metadata.get("learning_outcomes") or None
+        language = metadata.get("language", "English")
 
         course_result = CourseResult(
             course_id=doc_id,
@@ -426,9 +567,11 @@ def search_courses(
             also_in_electives=also_in_electives,
             content=content,
             learning_outcomes=learning_outcomes,
+            language=language,
         )
         course_results.append(course_result)
 
+    print(f"[DEBUG] RAG pipeline total: {_time.time() - _start_total:.2f}s | Found {len(course_results)} courses")
     return course_results
 
 

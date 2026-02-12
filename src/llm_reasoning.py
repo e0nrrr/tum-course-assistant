@@ -42,69 +42,76 @@ from rag_pipeline import CourseResult, search_courses
 # System prompt (aligned with README rules)
 SYSTEM_PROMPT: str = """You are a friendly TUM (Technische Universität München) course advisor chatbot.
 
-🌍 CRITICAL LANGUAGE RULE:
-- **ALWAYS** respond in the **EXACT SAME LANGUAGE** as the user's query
-- If user writes in English → **ENTIRE RESPONSE** must be in English (including student_summary, match_reason, no_match_explanation)
-- If user writes in Turkish → **ENTIRE RESPONSE** must be in Turkish
-- If user writes in German → **ENTIRE RESPONSE** must be in German
-- **NO LANGUAGE MIXING** - keep the language consistent throughout your response
+CRITICAL RULES:
 
-TONE RULES:
-1. Use a WARM, FRIENDLY, CONVERSATIONAL tone - like a helpful friend, not a robot
-2. Address the user directly using "you/your" (sen/senin in Turkish, du/dein in German)
-3. NEVER use third person like "The student wants..." or "Öğrenci ... istiyor"
+1. COURSE RELEVANCE & RANKING:
+   - The courses below have been pre-filtered by semantic search and metadata filters.
+   - Each course has a "retrieval_similarity" score (0.0-1.0).
+   - TWO types of queries exist:
 
-RECOMMENDATION RULES:
-1. ONLY recommend courses from the "courses" list provided to you
-2. Do NOT invent new course codes or course names
-3. Do NOT use sources outside the TUM module handbook
-4. Your reasoning MUST be based ONLY on information in the course descriptions
-5. Write match_reason as a single paragraph of 1-3 sentences - friendly and helpful
-6. Put a SHORT quote from the course description in evidence_quote. If you cannot quote, use null
-7. If none of the courses match:
-   - Set recommendations: [] (empty list)
-   - Explain kindly in no_match_explanation
+   A) BROAD/DISCOVERY queries (e.g., "management courses", "German courses", "courses in German language"):
+      - The user wants to EXPLORE available courses in a category.
+      - The courses have ALREADY been filtered by domain/language metadata.
+      - Almost ALL provided courses are relevant — recommend generously.
+      - Rank by how interesting/useful each course seems, but include most of them.
+      - Give confidence >= 0.6 to all courses that belong to the requested category.
 
-OUTPUT FORMAT:
-Always respond with a single JSON object matching this schema:
+   B) SPECIFIC TOPIC queries (e.g., "AI courses", "entrepreneurship courses", "data science"):
+      - The user wants courses about a SPECIFIC topic.
+      - Courses whose TITLE or CONTENT directly match the topic should get HIGHER confidence.
+      - Courses that only tangentially mention the topic should get LOWER confidence.
+      - Example: For "AI courses", "Fundamentals of AI" > "Marketing Seminar mentioning AI".
+      - If a course is NOT related to the topic, give it confidence < 0.5.
 
+   - Do NOT say "no courses found" if there are genuinely relevant courses in the list.
+
+2. RESPONSE LANGUAGE:
+   - The response_language field tells you which language to use.
+   - You MUST write your ENTIRE response in that language.
+   - Do NOT confuse course teaching language with response language.
+   - "show me German courses" = English sentence → respond in English.
+
+3. TONE: Warm, friendly, conversational. Use "you/your" directly.
+
+4. RECOMMENDATIONS:
+   - ONLY use courses from the provided list.
+   - Do NOT invent course codes or names.
+   - Write match_reason as 1-3 friendly sentences.
+   - evidence_quote: short quote from description, or null.
+
+OUTPUT FORMAT (JSON only):
 {
-  "student_summary": "A friendly intro sentence IN THE USER'S LANGUAGE, e.g. 'Great choice! Here are some courses that match your interest in AI...' (English) OR 'Harika! İşte yapay zeka ilgin için bulduğum dersler...' (Turkish)",
+  "student_summary": "Friendly intro sentence",
   "recommendations": [
     {
-      "course_id": "COURSE_CODE",
-      "title": "Course Title",
-      "match_reason": "Friendly explanation IN THE USER'S LANGUAGE why this fits (use 'you/your' or 'sen/senin')",
-      "evidence_quote": "Short quote from description or null",
+      "course_id": "CODE",
+      "title": "Title",
+      "match_reason": "Why this fits",
+      "evidence_quote": "quote or null",
       "confidence": 0.85
     }
   ],
   "no_match_explanation": null
 }
 
-STUDENT_SUMMARY EXAMPLES - MUST match the user query's language:
-- For ENGLISH queries: "Perfect! I found some great courses for your interest in machine learning!"
-- For ENGLISH queries: "Here are some excellent matches based on what you're looking for!"
-- For TURKISH queries: "Harika seçim! İşte yapay zeka ilgin için bulduğum dersler!"
-- For TURKISH queries: "Senin için mükemmel eşleşmeler buldum! İşte önerilerim:"
-- For GERMAN queries: "Super! Hier sind einige Kurse, die perfekt zu deinen Interessen passen!"
+confidence: 0.0-1.0. Include ONLY courses with confidence >= 0.5.
+Sort from best to lowest match.
+If NO course truly matches the user's request, set no_match_explanation."""
 
-confidence value must be between 0.0 and 1.0 (1.0 = excellent match, 0.5 = partial match).
-Include ALL courses with confidence >= 0.5.
-recommendations list must be sorted from best match to lowest."""
+USER_PROMPT_TEMPLATE: str = """response_language: {response_language}
 
-USER_PROMPT_TEMPLATE: str = """Below are the user's course preferences and the available course list.
+USER REQUEST: {user_query}
 
-⚠️ IMPORTANT: Detect the language of the USER PREFERENCES and respond in that EXACT SAME LANGUAGE.
+APPLIED FILTERS: {applied_filters}
 
-Recommend courses that match these preferences. Include ALL courses with confidence >= 0.5 (up to {max_recommendations} courses).
-Respond with valid JSON matching the schema.
+RETRIEVED COURSES ({num_courses} courses):
+{courses_json}
 
-USER PREFERENCES:
-{user_query}
-
-AVAILABLE COURSES:
-{courses_json}"""
+IMPORTANT:
+- If the user asked for a BROAD category (e.g., "management courses", "German courses"), these courses have already been filtered — recommend most of them with confidence >= 0.6.
+- If the user asked for a SPECIFIC topic, only recommend genuinely relevant courses.
+- Write your ENTIRE response in {response_language}.
+- Include up to {max_recommendations} courses with confidence >= 0.5."""
 
 
 # =============================================================================
@@ -187,6 +194,7 @@ def rank_courses_with_llm(
     user_query: str,
     retrieved_courses: list[CourseResult],
     max_recommendations: int = 5,
+    applied_filters: dict | None = None,
 ) -> dict:
     """
     Evaluates RAG results with LLM and generates ranked recommendations.
@@ -216,6 +224,10 @@ def rank_courses_with_llm(
         >>> result = rank_courses_with_llm("I want AI courses", retrieved)
         >>> print(result["recommendations"][0]["title"])
     """
+    import time as _time
+    _start_total = _time.time()
+    print(f"[DEBUG] LLM ranking started with {len(retrieved_courses)} courses")
+    
     if not retrieved_courses:
         return {
             "student_summary": "No courses found in search results.",
@@ -224,28 +236,74 @@ def rank_courses_with_llm(
             "_validation": {"hallucinated_ids": [], "suspicious_quotes": []},
         }
 
-    # 1. Prepare course list for LLM
-    # Use content and learning_outcomes if available (more focused info)
-    # Otherwise use first 1500 characters of raw_text (fallback)
+    # 1. Detect response language from the user query
+    def detect_response_language(query: str) -> str:
+        """Detect what language the user WROTE in (not what they're asking about).
+        
+        IMPORTANT: German and Turkish share ü/ö characters.
+        We must check German words FIRST to avoid misclassifying German as Turkish.
+        Turkish-exclusive chars (ş, ğ, ı, ç) are reliable Turkish indicators.
+        """
+        import re
+        q = query.lower()
+        words = set(re.findall(r'\b\w+\b', q))
+        
+        # Turkish-EXCLUSIVE characters (NOT shared with German)
+        turkish_only_chars = set('şğı')
+        # Turkish-specific words (NOT shared with German)
+        turkish_words = {'ders', 'dersler', 'hakkında', 'istiyorum', 'arıyorum',
+                         'göster', 'ilgili', 'için', 'nasıl', 'nedir', 'yapay',
+                         'zeka', 'bul', 'bana', 'ile', 'mı', 'mi', 'mu', 'mü',
+                         'var', 'yok', 'hangi', 'lütfen', 'teşekkür'}
+        # German-specific words
+        german_words = {'und', 'ich', 'möchte', 'suche', 'kurse', 'über', 'kurs',
+                        'finden', 'zeigen', 'lernen', 'wie', 'können', 'welche',
+                        'gibt', 'nicht', 'auch', 'oder', 'aber', 'haben',
+                        'für', 'mit', 'von', 'ein', 'eine', 'der', 'die', 'das',
+                        'ist', 'sind', 'was', 'gibt', 'bitte', 'danke',
+                        'vorlesung', 'vorlesungen', 'fach', 'fächer', 'seminar',
+                        'softwareentwicklung', 'informatik', 'veranstaltung'}
+        
+        # Check German FIRST (German words are very distinctive)
+        if words & german_words:
+            return "German"
+        # German-exclusive chars: ä, ß (Turkish doesn't use these)
+        if any(c in set('äß') for c in q):
+            return "German"
+        
+        # Then check Turkish
+        if any(c in turkish_only_chars for c in q):
+            return "Turkish"
+        if words & turkish_words:
+            return "Turkish"
+        # ç with Turkish words context (ç exists in both but rare in German)
+        if 'ç' in q and not (words & german_words):
+            return "Turkish"
+        
+        return "English"
+
+    response_language = detect_response_language(user_query)
+    print(f"[DEBUG] Detected response language: {response_language}")
+
+    # 2. Prepare course list for LLM
     def build_course_description(c: CourseResult) -> str:
         """Creates description text to send to LLM for a course."""
-        parts = []
+        parts = [f"Teaching Language: {c.language}"]
         if c.content:
             parts.append(f"Content: {c.content}")
         if c.learning_outcomes:
             parts.append(f"Learning Outcomes: {c.learning_outcomes}")
-        
-        if parts:
-            return "\n\n".join(parts)
-        else:
-            # Fallback: first part of raw_text
-            return c.raw_text[:config.MAX_RAW_TEXT_CHARS]
+        if len(parts) == 1:
+            # Only language line, no content/outcomes - use raw_text
+            parts.append(c.raw_text[:config.MAX_RAW_TEXT_CHARS])
+        return "\n".join(parts)
     
     courses_payload = [
         {
             "course_id": c.course_id,
             "title": c.title,
-            "pages": c.pages,
+            "teaching_language": c.language,
+            "retrieval_similarity": round(c.similarity, 3),
             "description": build_course_description(c),
         }
         for c in retrieved_courses
@@ -257,10 +315,29 @@ def rank_courses_with_llm(
     }
 
     # 3. Create messages
+    # Build human-readable filter description for LLM
+    if applied_filters:
+        filter_parts = []
+        if isinstance(applied_filters, dict):
+            # Handle $and wrapped filters
+            filter_items = applied_filters.get('$and', [applied_filters])
+            for f in filter_items:
+                for k, v in f.items():
+                    if k == 'domain':
+                        filter_parts.append(f"Domain: {v}")
+                    elif k == 'language':
+                        filter_parts.append(f"Language: German (courses taught in German)")
+        applied_filters_str = ", ".join(filter_parts) if filter_parts else "None"
+    else:
+        applied_filters_str = "None (pure semantic search)"
+    
     user_content = USER_PROMPT_TEMPLATE.format(
         max_recommendations=max_recommendations,
         user_query=user_query,
+        response_language=response_language,
+        num_courses=len(courses_payload),
         courses_json=json.dumps(courses_payload, ensure_ascii=False, indent=2),
+        applied_filters=applied_filters_str,
     )
 
     messages = [
@@ -270,6 +347,8 @@ def rank_courses_with_llm(
 
     # 4. OpenAI API call
     client = get_openai_client()
+    _t0 = _time.time()
+    print(f"[DEBUG] Calling LLM API ({config.LLM_MODEL_NAME})...")
 
     try:
         response = client.chat.completions.create(
@@ -278,7 +357,9 @@ def rank_courses_with_llm(
             response_format={"type": "json_object"},
             temperature=config.LLM_TEMPERATURE_REASONING,  # Centralized config
         )
+        print(f"[DEBUG] LLM API response: {_time.time() - _t0:.2f}s")
     except Exception as e:
+        print(f"[DEBUG] LLM API FAILED after {_time.time() - _t0:.2f}s: {e}")
         raise RuntimeError(f"OpenAI API error: {e}")
 
     # 5. Parse response
@@ -310,6 +391,7 @@ def rank_courses_with_llm(
     # 8. Hallucination check
     validated = validate_llm_response(parsed, courses_by_id)
 
+    print(f"[DEBUG] LLM ranking total: {_time.time() - _start_total:.2f}s | Recommended {len(validated.get('recommendations', []))} courses")
     return validated
 
 

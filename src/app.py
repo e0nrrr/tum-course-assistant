@@ -27,7 +27,8 @@ from rag_pipeline import CourseResult, detect_metadata_filters
 
 # Constants
 INITIAL_VISIBLE_COUNT = 10  # Show more courses initially for better discovery
-MAX_RECOMMENDATIONS = 50  # Increased for better course coverage (especially AI/ML courses)
+MAX_RECOMMENDATIONS = 10  # Max courses to show to user
+RAG_RETRIEVAL_COUNT = 30   # Retrieve more from ChromaDB, let LLM filter
 
 
 # =============================================================================
@@ -153,14 +154,35 @@ async def on_message(message: cl.Message):
     # Build recent messages for intent classification
     recent_msgs = chat_history[-6:] if chat_history else None
     
-    # Classify intent with fail-forward error handling
-    try:
-        intent = await async_classify_intent(user_input, has_context, recent_msgs)
-    except Exception as e:
-        # Fail-forward: default to SEARCH on any error
-        # User came here for courses - that's the safe assumption
-        print(f"[WARN] Intent classification failed, defaulting to SEARCH: {e}")
+    # SAFETY CHECK: New course search queries must ALWAYS go through SEARCH
+    # This prevents them from being answered from stale context (FOLLOWUP)
+    import re
+    _force_search_re = re.compile(
+        r'('
+        # Language preference queries
+        r'\b(german|deutsch|almanca|english|ingilizce|englisch)\b.*\b(course|courses|class|ders|dersler|kurs|taught|language)\b|'
+        r'\b(course|courses|class|ders|dersler|kurs|taught|language)\b.*\b(german|deutsch|almanca|english|ingilizce|englisch)\b|'
+        r'\b(in|on)\s+(german|deutsch|almanca|english|ingilizce|englisch)\b|'
+        r'\balmanca\b|\bingilizce\b|'
+        # Multilingual course search phrases (EN/DE/TR)
+        r'\b(show|find|search|recommend|any)\b.*\b(course|courses|class|classes)\b|'
+        r'\b(welche|zeig|finde|suche|gibt\s*es)\b.*\b(kurs|kurse|vorlesung|vorlesungen|fach|fächer|veranstaltung|seminar)\b|'
+        r'\b(göster|bul|ara|öner)\b.*\b(ders|dersler|kurs|kurslar)\b|'
+        r'\b(ders|dersler|kurs|kurslar)\b.*\b(hakkında|var\s*mı|arıyorum|istiyorum)\b'
+        r')',
+        re.IGNORECASE
+    )
+    if _force_search_re.search(user_input):
         intent = "SEARCH"
+    else:
+        # Classify intent with fail-forward error handling
+        try:
+            intent = await async_classify_intent(user_input, has_context, recent_msgs)
+        except Exception as e:
+            # Fail-forward: default to SEARCH on any error
+            # User came here for courses - that's the safe assumption
+            print(f"[WARN] Intent classification failed, defaulting to SEARCH: {e}")
+            intent = "SEARCH"
     
     # Route based on intent
     if intent in ["GREETING", "CHITCHAT", "HELP", "OUT_OF_SCOPE"]:
@@ -209,10 +231,10 @@ async def handle_search(query: str, chat_history: list):
     await msg.send()
     
     try:
-        # RAG retrieval - pass filters directly (already formatted with $and if needed)
+        # RAG retrieval - retrieve broadly, LLM will filter for relevance
         retrieved = await async_search_courses(
             query,
-            n_results=MAX_RECOMMENDATIONS,
+            n_results=RAG_RETRIEVAL_COUNT,
             filter_dict=filters
         )
     except Exception as e:
@@ -226,12 +248,22 @@ async def handle_search(query: str, chat_history: list):
         await msg.update()
         return
     
+    # Filter out very low similarity results before sending to LLM
+    # This prevents LLM from wasting tokens on clearly irrelevant courses
+    MIN_SIMILARITY = 0.38
+    filtered = [r for r in retrieved if r.similarity >= MIN_SIMILARITY]
+    if not filtered:
+        # If all below threshold, keep top 5 anyway
+        filtered = sorted(retrieved, key=lambda x: x.similarity, reverse=True)[:5]
+    retrieved = filtered
+    print(f"[DEBUG] After similarity filter (>={MIN_SIMILARITY}): {len(retrieved)} courses")
+    
     # LLM ranking
     msg.content = "Analyzing courses..."
     await msg.update()
     
     try:
-        result = await async_rank_courses(query, retrieved, MAX_RECOMMENDATIONS)
+        result = await async_rank_courses(query, retrieved, MAX_RECOMMENDATIONS, filters)
     except Exception as e:
         print(f"[ERROR] LLM ranking failed: {e}")
         msg.content = f"Analysis error: {str(e)}"

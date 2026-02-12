@@ -55,7 +55,8 @@ async def async_search_courses(
 async def async_rank_courses(
     query: str,
     retrieved_courses: list[CourseResult],
-    max_recommendations: int = 15
+    max_recommendations: int = 15,
+    applied_filters: dict | None = None
 ) -> dict:
     """
     Async wrapper for LLM course ranking.
@@ -64,6 +65,7 @@ async def async_rank_courses(
         query: User's original query
         retrieved_courses: Courses from RAG search
         max_recommendations: Maximum courses to recommend
+        applied_filters: Metadata filters that were applied during search
     
     Returns:
         Dict with 'student_summary', 'recommendations', 'no_match_explanation'
@@ -72,7 +74,8 @@ async def async_rank_courses(
         rank_courses_with_llm,
         query,
         retrieved_courses,
-        max_recommendations
+        max_recommendations,
+        applied_filters
     )
 
 

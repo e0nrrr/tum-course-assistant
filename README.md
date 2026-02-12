@@ -39,11 +39,13 @@ Open `http://localhost:8000` in your browser.
 ### Core Capabilities
 - **Natural Language Search** - Ask questions like "I want project-based courses about AI and innovation"
 - **Multilingual Query Translation** - Automatic translation of queries (Turkish, German, French, etc.) to English for optimal RAG search
+- **Query Expansion** - Short queries are automatically expanded with related academic terms via LLM for better retrieval (e.g., "AI courses" → "artificial intelligence AI machine learning deep learning neural networks")
 - **Universal Language Support** - Query in any language, get results in the same language (100+ languages via GPT-4o-mini)
-- **Smart Filtering** - Automatic detection of language, level, and domain preferences
+- **Smart Filtering** - Automatic detection of language, level, and domain preferences from natural language
+- **Broad vs Specific Query Handling** - System distinguishes between discovery queries ("German courses") and topic queries ("AI courses") for optimal result count
 - **Personalized Recommendations** - LLM-powered reasoning explains why each course matches your needs
 - **Action-Oriented Design** - Bot assumes you want courses (not chitchat) to save tokens and time
-- **Enhanced Discovery** - Retrieve up to 50 courses with initial display of 10 (expandable by +10)
+- **Enhanced Discovery** - Retrieve up to 30 courses from ChromaDB, display top 10 after LLM ranking
 
 ### Intent Router (Action-Oriented)
 The system uses a smart intent classification system optimized for efficiency:
@@ -101,16 +103,21 @@ Automatically detected from your query:
 ┌─────────────────────────────────────────────────────────────────┐
 │                      RAG Pipeline                               │
 │  ┌───────────────┐    ┌───────────────┐    ┌───────────────┐    │
-│  │ Query         │ -> │ Language      │ -> │ Metadata      │    │
-│  │ Processing    │    │ Detection &   │    │ Filter        │    │
-│  └───────────────┘    │ Translation   │    │ Detection     │    │
-│                       │ (GPT-4o-mini) │    └───────────────┘    │
+│  │ Query         │ -> │ Translation & │ -> │ Query         │    │
+│  │ Processing    │    │ Language Det. │    │ Expansion     │    │
+│  └───────────────┘    │ (GPT-4o-mini) │    │ (short query) │    │
+│                       └───────────────┘    └───────────────┘    │
+│                                                    │            │
+│                       ┌───────────────┐    ┌───────────────┐    │
+│                       │ Metadata      │ <- │ Embedding     │    │
+│                       │ Filter        │    │ (text-emb-3)  │    │
+│                       │ Detection     │    └───────────────┘    │
 │                       └───────────────┘            │            │
 │                                                    ▼            │
 │                                           ┌───────────────┐     │
-│                                           │ Vector        │     │
-│                                           │ Search        │     │
-│                                           │ (ChromaDB)    │     │
+│                                           │ Vector Search │     │
+│                                           │ + Similarity  │     │
+│                                           │ Filter (0.38) │     │
 │                                           └───────────────┘     │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -119,7 +126,7 @@ Automatically detected from your query:
 │                    LLM Reasoning Layer                          │
 │  ┌───────────────────────────────────────────────────────────┐  │
 │  │ GPT-4o-mini: Rank courses, generate explanations,         │  │
-│  │ validate against hallucination rules                      │  │
+│  │ broad vs specific query handling, filter-aware scoring    │  │
 │  └───────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -194,12 +201,21 @@ tum_project/
 | Innovation Electives (MMT) | 108 | Management |
 | Advanced Seminars | 28 | Management |
 | Informatics Specialization | 21 | Technology |
-| **Total (unique)** | **134** | - |
+| Finance & Accounting | 65 | Management |
+| Economics & Econometrics | 15 | Management |
+| Chemistry & Engineering | 42 | Technology |
+| Operations & Supply Chain | 10 | Management |
+| Industrial Engineering | 7 | Technology |
+| Information Technology | 21 | Technology |
+| **Total (in ChromaDB)** | **317** | - |
+
+> **Note:** Initially indexed 134 courses from 3 sources (Innovation, Advanced Seminars, Informatics). Later expanded to **317 courses** from 9 PDF sources.
 
 ### Language Distribution
-- English: 87 courses
-- German: 12 courses  
-- German/English: 10 courses
+- English: 214 courses
+- German: 65 courses
+- German/English: 30 courses
+- Other/Unknown: 8 courses
 
 ---
 
@@ -228,9 +244,12 @@ All settings are centralized in `src/config.py` for DRY compliance:
 | `LLM_MODEL_NAME` | gpt-4o-mini | LLM for reasoning |
 | `CHROMA_COLLECTION_NAME` | tum_courses | ChromaDB collection |
 | `CHROMA_PERSIST_DIR` | data/chroma_db | Vector database location |
-| `INITIAL_VISIBLE_COUNT` | 10 | Initial courses displayed (increased from 5) |
-| `MAX_RECOMMENDATIONS` | 50 | Max courses retrieved (increased from 15) |
-| `DEFAULT_N_RESULTS` | 30 | Default RAG retrieval count (increased from 5) |
+| `INITIAL_VISIBLE_COUNT` | 10 | Initial courses displayed |
+| `MAX_RECOMMENDATIONS` | 10 | Max courses shown to user |
+| `RAG_RETRIEVAL_COUNT` | 30 | Courses retrieved from ChromaDB (before LLM filtering) |
+| `MIN_SIMILARITY` | 0.38 | Minimum similarity threshold for retrieval |
+| `QUERY_EXPANSION_ENABLED` | True | Enable LLM-based query expansion |
+| `QUERY_EXPANSION_MIN_WORDS` | 5 | Expand queries shorter than this |
 
 ### LLM Parameters (Centralized)
 | Setting | Default | Description |
@@ -309,6 +328,8 @@ The system implements multiple safeguards:
 3. **Evidence Quotes** - LLM provides supporting text from course descriptions
 4. **Structured Output** - JSON schema enforces valid responses
 5. **Context-Only Answers** - Follow-up questions answered only from visible course data
+6. **Similarity Threshold** - Courses below 0.38 cosine similarity are filtered out before LLM ranking
+7. **Confidence Filtering** - LLM assigns confidence scores; only courses with >= 0.5 are shown
 
 ---
 
@@ -324,7 +345,7 @@ User Message
     │   ├── Help (help, ne yapabilirsin)   │ → HELP (0 LLM calls)
     │   └── Followup + Context             │ → FOLLOWUP (0 LLM calls)
     │                                      │
-    └── No Match ─────────────────────────┘
+    └── No Match ──────────────────────────┘
             │
             ▼
         LLM Classification
@@ -364,7 +385,7 @@ This ensures:
 ## Roadmap
 
 ### Completed 
-- [x] Multi-source PDF processing pipeline
+- [x] Multi-source PDF processing pipeline (9 PDF sources, 317 courses)
 - [x] Domain-aware filtering (management/technology)
 - [x] Language and level filters
 - [x] Structured section extraction (Content, Learning Outcomes)
@@ -380,8 +401,14 @@ This ensures:
 - [x] **Hardened error handling** (fail-forward to SEARCH)
 - [x] **Version-pinned dependencies** (production-ready)
 - [x] **Automatic query translation** (Turkish/German/etc → English for RAG)
-- [x] **Enhanced retrieval coverage** (50 courses, 10 initial display, +10 load more)
 - [x] **Universal multilingual support** (100+ languages via GPT-4o-mini)
+- [x] **Query Expansion** - LLM-based expansion of short queries with related academic terms
+- [x] **Smart language detection** - German vs Turkish disambiguation using exclusive character sets
+- [x] **Multilingual intent routing** - Regex patterns for German/Turkish course search phrases
+- [x] **Broad vs specific query handling** - LLM adapts recommendation count based on query type
+- [x] **Filter-aware LLM ranking** - Metadata filters passed to LLM for context-aware scoring
+- [x] **Similarity threshold filtering** - Pre-LLM filtering of low-quality retrieval results
+- [x] **Separated retrieval from display** - RAG retrieves 30, LLM selects best 10
 
 ---
 
